@@ -19,8 +19,16 @@ jobs:
         java-version: '17'
         distribution: 'temurin'
 
-    - name: Setup Android SDK
-      uses: android-actions/setup-android@v3
+    - name: Setup Android SDK manually
+      run: |
+        export ANDROID_HOME=$HOME/android-sdk
+        mkdir -p $ANDROID_HOME/cmdline-tools
+        wget -q https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip -O tools.zip
+        unzip -q tools.zip -d $ANDROID_HOME/cmdline-tools
+        mv $ANDROID_HOME/cmdline-tools/cmdline-tools $ANDROID_HOME/cmdline-tools/latest
+        export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+        yes | sdkmanager --licenses
+        sdkmanager "platform-tools" "platforms;android-34" "build-tools;34.0.0"
 
     - name: Create Android Project Structure
       run: |
@@ -100,5 +108,197 @@ jobs:
         </resources>
         EOF
 
-        cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.
-        
+        cat << 'EOF' > app/src/main/res/xml/accessibility_service_config.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+            android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+            android:accessibilityFeedbackType="feedbackGeneric"
+            android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagReportViewIds"
+            android:canPerformGestures="true"
+            android:canRetrieveWindowContent="true"
+            android:description="@string/service_desc"
+            android:notificationTimeout="100" />
+        EOF
+
+        cat << 'EOF' > app/src/main/AndroidManifest.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+            <application
+                android:allowBackup="true"
+                android:label="@string/app_name"
+                android:theme="@style/Theme.AppCompat.Light.DarkActionBar">
+                <activity
+                    android:name=".MainActivity"
+                    android:exported="true">
+                    <intent-filter>
+                        <action android:name="android.intent.action.MAIN" />
+                        <category android:name="android.intent.category.LAUNCHER" />
+                    </intent-filter>
+                </activity>
+                <service
+                    android:name=".AutoAcceptService"
+                    android:exported="true"
+                    android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+                    <intent-filter>
+                        <action android:name="android.accessibilityservice.AccessibilityService" />
+                    </intent-filter>
+                    <meta-data
+                        android:name="android.accessibilityservice"
+                        android:resource="@xml/accessibility_service_config" />
+                </service>
+            </application>
+        </manifest>
+        EOF
+
+        cat << 'EOF' > app/src/main/res/layout/activity_main.xml
+        <?xml version="1.0" encoding="utf-8"?>
+        <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:orientation="vertical"
+            android:padding="24dp">
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Porter Order Filter Setup"
+                android:textSize="22sp"
+                android:textStyle="bold"
+                android:layout_marginBottom="20dp"/>
+            <EditText
+                android:id="@+id/etMinFare"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Minimum Price (Rs) - Jaise: 400"
+                android:inputType="number" />
+            <EditText
+                android:id="@+id/etSwipeY"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Slide Button Y Position (Default: 1950)"
+                android:inputType="number"
+                android:layout_marginTop="12dp" />
+            <Button
+                android:id="@+id/btnSave"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Save Settings"
+                android:layout_marginTop="20dp" />
+            <Button
+                android:id="@+id/btnAccessibility"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Open Accessibility Settings"
+                android:layout_marginTop="12dp" />
+        </LinearLayout>
+        EOF
+
+        cat << 'EOF' > app/src/main/java/com/example/orderhelper/MainActivity.kt
+        package com.example.orderhelper
+
+        import android.content.Context
+        import android.content.Intent
+        import android.os.Bundle
+        import android.provider.Settings
+        import android.widget.Button
+        import android.widget.EditText
+        import android.widget.Toast
+        import androidx.appcompat.app.AppCompatActivity
+
+        class MainActivity : AppCompatActivity() {
+            override fun onCreate(savedInstanceState: Bundle?) {
+                super.onCreate(savedInstanceState)
+                setContentView(R.layout.activity_main)
+
+                val prefs = getSharedPreferences("OrderPrefs", Context.MODE_PRIVATE)
+                val etMinFare = findViewById<EditText>(R.id.etMinFare)
+                val etSwipeY = findViewById<EditText>(R.id.etSwipeY)
+                val btnSave = findViewById<Button>(R.id.btnSave)
+                val btnAccessibility = findViewById<Button>(R.id.btnAccessibility)
+
+                etMinFare.setText(prefs.getInt("min_fare", 300).toString())
+                etSwipeY.setText(prefs.getFloat("swipe_y", 1950f).toInt().toString())
+
+                btnSave.setOnClickListener {
+                    val minFare = etMinFare.text.toString().toIntOrNull() ?: 300
+                    val swipeY = etSwipeY.text.toString().toFloatOrNull() ?: 1950f
+                    prefs.edit().putInt("min_fare", minFare).putFloat("swipe_y", swipeY).apply()
+                    Toast.makeText(this, "Settings Saved!", Toast.LENGTH_SHORT).show()
+                }
+
+                btnAccessibility.setOnClickListener {
+                    startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+                }
+            }
+        }
+        EOF
+
+        cat << 'EOF' > app/src/main/java/com/example/orderhelper/AutoAcceptService.kt
+        package com.example.orderhelper
+
+        import android.accessibilityservice.AccessibilityService
+        import android.accessibilityservice.GestureDescription
+        import android.content.Context
+        import android.graphics.Path
+        import android.view.accessibility.AccessibilityEvent
+        import android.view.accessibility.AccessibilityNodeInfo
+
+        class AutoAcceptService : AccessibilityService() {
+            private var isSwiping = false
+
+            override fun onAccessibilityEvent(event: AccessibilityEvent?) {
+                val rootNode = rootInActiveWindow ?: return
+                val texts = mutableListOf<String>()
+                extractText(rootNode, texts)
+
+                val prefs = getSharedPreferences("OrderPrefs", Context.MODE_PRIVATE)
+                val minFare = prefs.getInt("min_fare", 300)
+                val swipeY = prefs.getFloat("swipe_y", 1950f)
+
+                var hasAccept = false
+                var fareOk = false
+
+                for (t in texts) {
+                    if (t.contains("Accept", true) || t.contains("Slide", true)) hasAccept = true
+                    if (t.contains("₹") || t.contains("Rs", true)) {
+                        val num = t.replace(Regex("[^0-9]"), "").toIntOrNull() ?: 0
+                        if (num >= minFare) fareOk = true
+                    }
+                }
+
+                if (hasAccept && fareOk && !isSwiping) {
+                    isSwiping = true
+                    val path = Path().apply {
+                        moveTo(150f, swipeY)
+                        lineTo(900f, swipeY)
+                    }
+                    val stroke = GestureDescription.StrokeDescription(path, 0, 400)
+                    val gesture = GestureDescription.Builder().addStroke(stroke).build()
+                    dispatchGesture(gesture, object : GestureResultCallback() {
+                        override fun onCompleted(g: GestureDescription?) { isSwiping = false }
+                        override fun onCancelled(g: GestureDescription?) { isSwiping = false }
+                    }, null)
+                }
+            }
+
+            private fun extractText(node: AccessibilityNodeInfo?, list: MutableList<String>) {
+                if (node == null) return
+                if (!node.text.isNullOrEmpty()) list.add(node.text.toString())
+                for (i in 0 until node.childCount) extractText(node.getChild(i), list)
+            }
+
+            override fun onInterrupt() {}
+        }
+        EOF
+
+    - name: Build with Gradle
+      run: |
+        export ANDROID_HOME=$HOME/android-sdk
+        export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools
+        gradle wrapper --gradle-version 8.1.1
+        ./gradlew assembleDebug
+
+    - name: Upload APK Artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: Porter-Auto-Helper-APK
+        path: app/build/outputs/apk/debug/app-debug.apk
